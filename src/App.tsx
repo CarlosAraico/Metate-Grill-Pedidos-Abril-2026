@@ -10,7 +10,8 @@ import {
   Plus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import html2pdf from 'html2pdf.js';
+import { toCanvas } from 'html-to-image';
+import { jsPDF } from 'jspdf';
 import { 
   Insumo, 
   INITIAL_DATA, 
@@ -178,7 +179,8 @@ export default function App() {
   }, [data, searchTerm]);
 
   /**
-   * Enhanced PDF Export Handler with Proper Pagination
+   * PDF Export Handler using html-to-image and jsPDF
+   * This avoids html2canvas CSS parsing errors (oklab/oklch)
    */
   const handleExportPdf = async () => {
     if (!documentRef.current) return;
@@ -186,42 +188,59 @@ export default function App() {
     setIsExporting(true);
     const element = documentRef.current;
     
-    const opt = {
-      margin: [10, 10, 10, 10] as [number, number, number, number],
-      filename: `METATE-GRILL-SOLICITUD-${new Date().toISOString().split('T')[0]}.pdf`,
-      image: { type: 'jpeg' as const, quality: 0.98 },
-      html2canvas: { 
-        scale: 2, 
-        useCORS: true,
-        // CRITICAL: We avoid background colors that might use oklab internally
-        backgroundColor: '#0C0C0C' 
-      },
-      jsPDF: { unit: 'mm' as const, format: 'a4' as const, orientation: 'portrait' as const },
-      pagebreak: { 
-        mode: ['avoid-all', 'css', 'legacy'] as any, // Avoid breaking inside sections/tables
-        after: '.group-section' 
-      }
-    };
-
     try {
-      // Temporary injection of clean styles for PDF engine
-      const style = document.createElement('style');
-      style.innerHTML = `
-        /* Force hex colors for PDF engine to avoid oklab errors */
-        .document-container { color: #FFFFFF !important; }
-        .document-container .text-brand-accent { color: #C83E2D !important; }
-        .document-container .text-brand-ink-dim { color: #999999 !important; }
-        .document-container .bg-brand-surface { background-color: #161616 !important; }
-        .document-container .bg-brand-surface-light { background-color: #222222 !important; }
-        .document-container .border-brand-border { border-color: #2A2A2A !important; }
-        .group-section { page-break-inside: avoid !important; }
-        tr { page-break-inside: avoid !important; }
-      `;
-      document.head.appendChild(style);
-
-      await html2pdf().set(opt).from(element).save();
+      // 1. Capture the entire element as a canvas
+      // This uses the browser's native renderer, so oklch/oklab works perfectly
+      const canvas = await toCanvas(element, { 
+        pixelRatio: 2,
+        backgroundColor: '#0C0C0C', // Match brand-bg
+        style: {
+          transform: 'none', // Ensure no transforms interfere
+        }
+      });
       
-      document.head.removeChild(style);
+      const imgData = canvas.toDataURL('image/jpeg', 1.0);
+      
+      const pdf = new jsPDF({
+        orientation: 'p',
+        unit: 'mm',
+        format: 'a4',
+      });
+
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      
+      // Calculate how many pages we need
+      const imgWidth = canvas.width;
+      const imgHeight = canvas.height;
+      const ratio = pageWidth / (imgWidth / 2); // Divide by 2 because pixelRatio was 2
+      const canvasPageHeight = (pageHeight / ratio) * 2; // In canvas pixels
+      
+      let heightLeft = imgHeight;
+      let position = 0;
+      let page = 1;
+
+      // Slice the canvas manually into pages
+      while (heightLeft > 0) {
+        if (page > 1) pdf.addPage();
+        
+        // Add image to page
+        // We use the full image but "offset" it relative to the page
+        pdf.addImage(
+          imgData, 
+          'JPEG', 
+          0, 
+          position, 
+          pageWidth, 
+          (imgHeight * ratio) / 2
+        );
+        
+        heightLeft -= canvasPageHeight;
+        position -= pageHeight;
+        page++;
+      }
+
+      pdf.save(`METATE-GRILL-SOLICITUD-${new Date().toISOString().split('T')[0]}.pdf`);
     } catch (error) {
       console.error('Error generating PDF:', error);
     } finally {
